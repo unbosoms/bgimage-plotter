@@ -1,0 +1,367 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<!-- 外部との通信をすべて禁止する（画像は手元のファイル・貼り付けだけを blob: で読む） -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src blob: data:; connect-src 'none'; form-action 'none'; base-uri 'none'">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>背景イメージの座標取り</title>
+<!--
+  背景イメージの座標取り：画像の上をクリックして点（座席・駅・設備など）の座標を取り、CSV に書き出すツール。
+  - Tableau の背景イメージなど、画像の上に点を重ねるための X・Y を作る。
+  - 画像はブラウザの中だけで読む。外部との通信はしない（上の Content-Security-Policy で禁止している）。
+  - 出力の Y は既定で「画像の高さ − 画素の y」（Tableau の Y は上向きのため）。
+  - 使い方はこの画面の右側と README.md に書いてある。
+  - License: MIT（LICENSE を参照）
+-->
+<style>
+:root{--bg:#eef0f3;--panel:#fff;--ink:#222;--muted:#666;--line:#d8dce2;--accent:#047cc1;--pt:#e0004d;--warn:#b35c00}
+*{box-sizing:border-box}
+html,body{height:100%}
+body{margin:0;font-family:"BIZ UDPGothic","Meiryo UI","Hiragino Sans",system-ui,sans-serif;background:var(--bg);color:var(--ink);font-size:13px;display:grid;grid-template-columns:1fr 380px}
+#stage{overflow:auto;position:relative}
+#wrap{position:relative;display:inline-block;margin:16px}
+#cv{display:block;cursor:crosshair;background:#fff;box-shadow:0 0 0 1px var(--line)}
+#drop{position:absolute;inset:16px;border:2px dashed #9aa3ae;border-radius:8px;display:flex;align-items:center;justify-content:center;flex-direction:column;gap:8px;color:var(--muted);font-size:15px;text-align:center;background:#f8f9fb}
+#drop.hover{border-color:var(--accent);color:var(--accent)}
+#ed{position:absolute;display:none;width:160px;padding:3px 6px;font:inherit;font-size:14px;border:2px solid var(--accent);border-radius:4px;box-shadow:0 2px 6px rgba(0,0,0,.2);z-index:5}
+aside{background:var(--panel);border-left:1px solid var(--line);padding:12px 14px;overflow:auto;display:flex;flex-direction:column;gap:14px}
+h1{font-size:15px;margin:0}
+h2{font-size:13px;margin:0 0 6px;color:var(--accent)}
+section{border-top:1px solid var(--line);padding-top:10px}
+label{display:flex;align-items:center;gap:6px;margin:3px 0}
+input[type=number]{width:60px}
+button{font:inherit;padding:4px 10px;border:1px solid var(--line);border-radius:4px;background:#f7f8fa;cursor:pointer}
+button.primary{background:var(--accent);color:#fff;border-color:var(--accent)}
+button:disabled{opacity:.5;cursor:default}
+.row{display:flex;gap:6px;flex-wrap:wrap;align-items:center}
+.muted{color:var(--muted)}
+textarea{width:100%;height:80px;font:inherit;font-size:12px}
+table{width:100%;border-collapse:collapse;font-size:12px}
+th,td{border-bottom:1px solid var(--line);padding:2px 4px;text-align:left}
+th{color:var(--muted);font-weight:normal}
+td.num{text-align:right;font-variant-numeric:tabular-nums}
+td input{width:100%;font:inherit;border:1px solid transparent;padding:1px 3px}
+td input:focus{border-color:var(--accent)}
+tr.sel{background:#e6f3fb}
+.del{border:none;background:none;color:#999;padding:0 4px}
+.del:hover{color:var(--pt)}
+.box{background:#f7f8fa;border:1px solid var(--line);border-radius:4px;padding:8px;line-height:1.7}
+.box b{font-variant-numeric:tabular-nums}
+.warn{color:var(--warn)}
+kbd{border:1px solid #bbb;border-bottom-width:2px;border-radius:3px;padding:0 3px;font-size:11px;background:#fff}
+#listWrap{max-height:40vh;overflow:auto}
+</style>
+</head>
+<body>
+<div id="stage">
+  <div id="wrap">
+    <canvas id="cv" width="800" height="500"></canvas>
+    <div id="drop">画像をここにドラッグ＆ドロップ<br>または右の「画像を開く」／<kbd>Ctrl</kbd>（Mac は <kbd>⌘</kbd>）+<kbd>V</kbd> で貼り付け</div>
+    <input id="ed" type="text" placeholder="名前を入力して Enter">
+  </div>
+</div>
+
+<aside>
+  <h1>背景イメージの座標取り</h1>
+
+  <section>
+    <h2>1. 画像</h2>
+    <div class="row">
+      <button class="primary" id="openBtn">画像を開く</button>
+      <input type="file" id="file" accept="image/*" hidden>
+      <span id="imgInfo" class="muted">未読み込み</span>
+    </div>
+    <div class="row" style="margin-top:6px">
+      表示倍率 <button id="zOut">−</button><span id="zLabel">100%</span><button id="zIn">＋</button><button id="zFit">全体</button>
+    </div>
+  </section>
+
+  <section>
+    <h2>2. 点を置く</h2>
+    <div class="muted" style="line-height:1.6">
+      クリックで点を追加 → 名前を入れて <kbd>Enter</kbd>。<br>
+      点をドラッグで移動、クリックで名前の修正。<br>
+      <kbd>Delete</kbd>：選んだ点を削除／<kbd>Ctrl</kbd>（Mac は <kbd>⌘</kbd>）+<kbd>Z</kbd>：最後の点を取り消し
+    </div>
+    <label><input type="checkbox" id="labels" checked>名前を画像の上に表示</label>
+    <details>
+      <summary>名前のリストから順に付ける（任意）</summary>
+      <div class="muted" style="margin:4px 0">1行に1つ。クリックするたびに上から使い、使った行は消える。空になったら入力欄が出る。</div>
+      <textarea id="queue" placeholder="A-01&#10;A-02&#10;A-03"></textarea>
+    </details>
+  </section>
+
+  <section>
+    <h2>3. 点の一覧（<span id="count">0</span> 件）</h2>
+    <div id="listWrap">
+      <table>
+        <thead><tr><th>#</th><th>名前</th><th>X</th><th>Y</th><th></th></tr></thead>
+        <tbody id="list"></tbody>
+      </table>
+    </div>
+    <div class="muted" style="margin-top:4px">X・Y は書き出す値（下の設定による）。</div>
+  </section>
+
+  <section>
+    <h2>4. 書き出し</h2>
+    <label><input type="checkbox" id="flip" checked>Y を上向きにする（画像の高さ − 画素の y）</label>
+    <div class="row" style="margin-top:6px">
+      <button class="primary" id="csvBtn" disabled>CSV を保存</button>
+      <button id="copyBtn" disabled>表をコピー（Excel 貼り付け用）</button>
+    </div>
+    <div class="row" style="margin-top:6px">
+      <button id="importBtn">CSV を読み込んで続きから</button>
+      <input type="file" id="csvFile" accept=".csv,text/csv" hidden>
+      <button id="clearBtn">すべて消す</button>
+    </div>
+    <div id="msg" class="muted" style="margin-top:4px"></div>
+  </section>
+
+  <section>
+    <h2>5. Tableau での設定</h2>
+    <div class="box" id="tabSetting">画像を読み込むと表示します。</div>
+    <ol class="muted" style="padding-left:18px;line-height:1.6;margin:6px 0 0">
+      <li>CSV をデータソースにつなぐ（X・Y は数値（小数））。</li>
+      <li>［マップ］＞［背景イメージ］＞ データソース ＞［イメージの追加］で、同じ画像と上の値を入れる。</li>
+      <li>X を［列］、Y を［行］に置き、右クリックで［ディメンション］にする（集計しない）。</li>
+      <li>軸がずれるときは、両方の軸を［軸の編集］で上の範囲に固定する。</li>
+    </ol>
+    <div class="muted" style="margin-top:6px">画像の形式は PNG・JPEG を使う（WebP は Tableau で読めないことがあるので、PNG に変換しておく）。</div>
+  </section>
+</aside>
+
+<script>
+const $ = s => document.querySelector(s);
+const cv = $('#cv'), ctx = cv.getContext('2d'), ed = $('#ed');
+const S = { img: null, name: 'image', W: 0, H: 0, zoom: 1, pts: [], sel: -1, editing: -1, editingNew: false };
+const STORE = 'bgimage-coords-v1';
+
+// ---------- 画像の読み込み ----------
+function loadImage(src, name) {
+  const img = new Image();
+  img.onload = () => {
+    S.img = img; S.W = img.naturalWidth; S.H = img.naturalHeight;
+    S.name = (name || 'image').replace(/\.[^.]+$/, '');
+    cv.width = S.W; cv.height = S.H;
+    $('#drop').style.display = 'none';
+    $('#imgInfo').textContent = `${name || ''}　${S.W} × ${S.H} px`;
+    restore();
+    fitZoom(); draw(); render();
+  };
+  img.onerror = () => msg('画像を開けませんでした。', true);
+  img.src = src;
+}
+$('#openBtn').onclick = () => $('#file').click();
+$('#file').onchange = e => { const f = e.target.files[0]; if (f) loadImage(URL.createObjectURL(f), f.name); e.target.value = ''; };
+const drop = $('#drop'), stage = $('#stage');
+stage.addEventListener('dragover', e => { e.preventDefault(); drop.classList.add('hover'); });
+stage.addEventListener('dragleave', () => drop.classList.remove('hover'));
+stage.addEventListener('drop', e => {
+  e.preventDefault(); drop.classList.remove('hover');
+  const f = [...e.dataTransfer.files].find(f => f.type.startsWith('image/'));
+  if (f) loadImage(URL.createObjectURL(f), f.name);
+});
+document.addEventListener('paste', e => {
+  if (document.activeElement && ['INPUT', 'TEXTAREA'].includes(document.activeElement.tagName)) return;
+  const it = [...e.clipboardData.items].find(i => i.type.startsWith('image/'));
+  if (it) loadImage(URL.createObjectURL(it.getAsFile()), 'pasted.png');
+});
+
+// ---------- 表示倍率 ----------
+function setZoom(z) {
+  S.zoom = Math.min(4, Math.max(0.1, z));
+  cv.style.width = (S.W * S.zoom) + 'px'; cv.style.height = (S.H * S.zoom) + 'px';
+  $('#zLabel').textContent = Math.round(S.zoom * 100) + '%';
+  draw(); placeEditor();
+}
+function fitZoom() {
+  const r = stage.getBoundingClientRect();
+  if (r.width < 100 || r.height < 100) return setZoom(1);   // 画面が隠れていて大きさが取れないときは等倍
+  setZoom(Math.min((r.width - 32) / S.W, (r.height - 32) / S.H, 1));
+}
+$('#zIn').onclick = () => setZoom(S.zoom * 1.25);
+$('#zOut').onclick = () => setZoom(S.zoom / 1.25);
+$('#zFit').onclick = fitZoom;
+
+// ---------- 描画 ----------
+function draw() {
+  if (!S.img) return;
+  ctx.clearRect(0, 0, S.W, S.H); ctx.drawImage(S.img, 0, 0);
+  const r = 7 / S.zoom, lw = 2 / S.zoom, fs = 13 / S.zoom;
+  ctx.font = `bold ${fs}px "BIZ UDPGothic","Meiryo UI",sans-serif`;
+  ctx.textBaseline = 'middle';
+  S.pts.forEach((p, i) => {
+    const col = i === S.sel ? '#047cc1' : '#e0004d';
+    ctx.beginPath(); ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
+    ctx.lineWidth = lw * 2.5; ctx.strokeStyle = '#fff'; ctx.stroke();
+    ctx.lineWidth = lw; ctx.strokeStyle = col; ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(p.x - r * 0.5, p.y); ctx.lineTo(p.x + r * 0.5, p.y); ctx.moveTo(p.x, p.y - r * 0.5); ctx.lineTo(p.x, p.y + r * 0.5); ctx.stroke();
+    if ($('#labels').checked && p.name) {
+      const tx = p.x + r + 3 / S.zoom;
+      ctx.lineWidth = 3 / S.zoom; ctx.strokeStyle = '#fff'; ctx.strokeText(p.name, tx, p.y);
+      ctx.fillStyle = col; ctx.fillText(p.name, tx, p.y);
+    }
+  });
+}
+$('#labels').onchange = draw;
+
+// ---------- 出力の座標 ----------
+const r1 = v => Math.round(v * 10) / 10;
+const outXY = p => ({ X: r1(p.x), Y: r1($('#flip').checked ? S.H - p.y : p.y) });
+
+// ---------- 一覧 ----------
+function render() {
+  const tb = $('#list'); tb.innerHTML = '';
+  S.pts.forEach((p, i) => {
+    const o = outXY(p), tr = document.createElement('tr');
+    if (i === S.sel) tr.className = 'sel';
+    tr.innerHTML = `<td>${i + 1}</td><td><input value="${esc(p.name)}"></td><td class="num">${o.X}</td><td class="num">${o.Y}</td>` +
+      `<td><button class="del" title="削除">✕</button></td>`;
+    const inp = tr.querySelector('input');
+    inp.onfocus = () => { S.sel = i; draw(); markSel(); };
+    inp.oninput = () => { p.name = inp.value; draw(); save(); };
+    tr.querySelector('.del').onclick = () => { S.pts.splice(i, 1); S.sel = -1; draw(); render(); };
+    tb.appendChild(tr);
+  });
+  $('#count').textContent = S.pts.length;
+  $('#csvBtn').disabled = $('#copyBtn').disabled = !S.pts.length;
+  const fl = $('#flip').checked;
+  $('#tabSetting').innerHTML = S.img
+    ? `画像：${S.W} × ${S.H} px<br>X フィールド：<b>X</b>　左 <b>0</b> ／ 右 <b>${S.W}</b><br>Y フィールド：<b>Y</b>　` +
+      (fl ? `上 <b>${S.H}</b> ／ 下 <b>0</b>` : `上 <b>0</b> ／ 下 <b>${S.H}</b><br><span class="warn">Y を上向きにしていないため、上下が逆になります。Y の軸を［軸の編集］で反転してください。</span>`)
+    : '画像を読み込むと表示します。';
+  save();
+}
+function markSel() { [...$('#list').children].forEach((tr, i) => tr.classList.toggle('sel', i === S.sel)); }
+const esc = s => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+$('#flip').onchange = render;
+
+// ---------- 名前の入力欄 ----------
+function openEditor(i, isNew) {
+  S.editing = i; S.editingNew = isNew; S.sel = i;
+  ed.value = S.pts[i].name; ed.style.display = 'block'; placeEditor();
+  ed.focus(); ed.select(); draw(); markSel();
+}
+function placeEditor() {
+  if (S.editing < 0) return;
+  const p = S.pts[S.editing];
+  ed.style.left = (p.x * S.zoom + 12) + 'px'; ed.style.top = (p.y * S.zoom - 14) + 'px';
+}
+function closeEditor(commit) {
+  if (S.editing < 0) return;
+  const i = S.editing, p = S.pts[i];
+  S.editing = -1; ed.style.display = 'none';
+  if (commit) p.name = ed.value.trim();
+  if (S.editingNew && !p.name) { S.pts.splice(i, 1); S.sel = -1; }   // 新しい点で名前なし＝取り消し
+  draw(); render();
+}
+ed.addEventListener('keydown', e => {
+  if (e.isComposing) return;   // 日本語変換中の Enter は確定に使う
+  if (e.key === 'Enter') { e.preventDefault(); closeEditor(true); }
+  if (e.key === 'Escape') { e.preventDefault(); closeEditor(false); }
+});
+ed.addEventListener('blur', () => closeEditor(true));
+
+// ---------- マウス ----------
+function pos(e) { const r = cv.getBoundingClientRect(); return { x: (e.clientX - r.left) * S.W / r.width, y: (e.clientY - r.top) * S.H / r.height }; }
+function hitTest(x, y) {
+  const lim = 9 / S.zoom; let best = -1, bd = Infinity;
+  S.pts.forEach((p, i) => { const d = Math.hypot(p.x - x, p.y - y); if (d < lim && d < bd) { bd = d; best = i; } });
+  return best;
+}
+let drag = null;
+cv.addEventListener('pointerdown', e => {
+  if (!S.img || e.button !== 0) return;
+  e.preventDefault();
+  closeEditor(true);
+  const { x, y } = pos(e), hit = hitTest(x, y);
+  if (hit >= 0) { S.sel = hit; drag = { i: hit, moved: false, sx: e.clientX, sy: e.clientY }; cv.setPointerCapture(e.pointerId); draw(); markSel(); return; }
+  const q = $('#queue').value.split('\n'), name = (q.find(l => l.trim()) || '').trim();
+  if (name) $('#queue').value = q.slice(q.findIndex(l => l.trim()) + 1).join('\n');
+  S.pts.push({ name, x, y });
+  const i = S.pts.length - 1; S.sel = i;
+  draw(); render();
+  if (!name) openEditor(i, true);
+  else msg(`「${name}」を置きました`);
+});
+cv.addEventListener('pointermove', e => {
+  if (!drag) return;
+  if (!drag.moved && Math.hypot(e.clientX - drag.sx, e.clientY - drag.sy) < 3) return;
+  drag.moved = true;
+  const { x, y } = pos(e), p = S.pts[drag.i];
+  p.x = Math.min(S.W, Math.max(0, x)); p.y = Math.min(S.H, Math.max(0, y));
+  draw();
+});
+cv.addEventListener('pointerup', () => {
+  if (!drag) return;
+  const d = drag; drag = null;
+  if (d.moved) render(); else openEditor(d.i, false);
+});
+cv.addEventListener('wheel', e => {
+  if (!(e.ctrlKey || e.metaKey) || !S.img) return;   // ピンチ／⌘＋ホイールで拡大縮小
+  e.preventDefault(); setZoom(S.zoom * (e.deltaY < 0 ? 1.1 : 1 / 1.1));
+}, { passive: false });
+document.addEventListener('keydown', e => {
+  if (['INPUT', 'TEXTAREA'].includes(document.activeElement.tagName)) return;
+  if ((e.key === 'Delete' || e.key === 'Backspace') && S.sel >= 0) { S.pts.splice(S.sel, 1); S.sel = -1; draw(); render(); }
+  if ((e.metaKey || e.ctrlKey) && e.key === 'z' && S.pts.length) { S.pts.pop(); S.sel = -1; draw(); render(); msg('最後の点を取り消しました'); }
+});
+
+// ---------- 書き出し・読み込み ----------
+// 名前が = + - @ で始まると Excel で数式として動くため、先頭に ' を付けて書き出す（読み込むときに外す）
+const safeName = v => /^[=+\-@\t\r]/.test(v) ? "'" + v : v;
+const unsafeName = v => /^'[=+\-@\t\r]/.test(v) ? v.slice(1) : v;
+const csvCell = v => /[",\n]/.test(String(v)) ? `"${String(v).replace(/"/g, '""')}"` : v;
+function rows() { return S.pts.map((p, i) => { const o = outXY(p); return [i + 1, safeName(p.name), o.X, o.Y, r1(p.x), r1(p.y)]; }); }
+const HEAD = ['番号', '名前', 'X', 'Y', '画素X', '画素Y'];
+$('#csvBtn').onclick = () => {
+  const text = '﻿' + [HEAD, ...rows()].map(r => r.map(csvCell).join(',')).join('\r\n') + '\r\n';
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([text], { type: 'text/csv' }));
+  a.download = `${S.name}_座標.csv`; a.click();
+  msg(`${a.download} を保存しました（${S.pts.length} 件）`);
+};
+$('#copyBtn').onclick = async () => {
+  const text = [HEAD, ...rows()].map(r => r.join('\t')).join('\n');
+  try { await navigator.clipboard.writeText(text); msg('表をコピーしました。Excel に貼り付けられます。'); } catch (e) { msg('コピーできませんでした。CSV を保存してください。', true); }
+};
+$('#importBtn').onclick = () => { if (!S.img) return msg('先に画像を開いてください。', true); $('#csvFile').click(); };
+$('#csvFile').onchange = async e => {
+  const f = e.target.files[0]; e.target.value = ''; if (!f) return;
+  const lines = (await f.text()).replace(/^﻿/, '').split(/\r?\n/).filter(l => l.trim()).map(parseCsvLine);
+  const h = lines.shift(), ix = k => h.indexOf(k);
+  // 名前の列は「名前」（このツールの出力）を優先し、なければ「表示名」「駅名」を使う（別の表から作った CSV も読めるように）
+  const ni = ['名前', '表示名', '駅名'].map(ix).find(i => i >= 0) ?? -1;
+  // 座標は画素X・画素Y を使う。なければ X・Y を、今の「Y を上向きにする」の設定で画素に戻す
+  const px = ix('画素X') >= 0 && ix('画素Y') >= 0, xi = px ? ix('画素X') : ix('X'), yi = px ? ix('画素Y') : ix('Y');
+  if (xi < 0 || yi < 0) return msg('X・Y（または画素X・画素Y）の列がある CSV を選んでください。', true);
+  const fl = !px && $('#flip').checked;
+  S.pts = lines.map(r => ({ name: ni >= 0 ? unsafeName((r[ni] || '').trim()) : '', x: +r[xi], y: fl ? S.H - r[yi] : +r[yi] }))
+    .filter(p => Number.isFinite(p.x) && Number.isFinite(p.y));
+  S.sel = -1; draw(); render(); msg(`${S.pts.length} 件を読み込みました`);
+};
+function parseCsvLine(l) {
+  const out = []; let cur = '', q = false;
+  for (let i = 0; i < l.length; i++) {
+    const c = l[i];
+    if (q) { if (c === '"' && l[i + 1] === '"') { cur += '"'; i++; } else if (c === '"') q = false; else cur += c; }
+    else if (c === '"') q = true; else if (c === ',') { out.push(cur); cur = ''; } else cur += c;
+  }
+  out.push(cur); return out;
+}
+$('#clearBtn').onclick = () => { if (S.pts.length && confirm('すべての点を消しますか？')) { S.pts = []; S.sel = -1; draw(); render(); } };
+
+// ---------- 途中の状態を残す（このブラウザの中だけ。画像の大きさが同じときに復元） ----------
+function save() { try { localStorage.setItem(STORE, JSON.stringify({ W: S.W, H: S.H, name: S.name, pts: S.pts })); } catch (e) {} }
+function restore() {
+  try {
+    const d = JSON.parse(localStorage.getItem(STORE) || 'null');
+    if (d && d.W === S.W && d.H === S.H && d.pts && d.pts.length && !S.pts.length &&
+        confirm(`前回の点が ${d.pts.length} 件残っています（${d.name}）。続きから始めますか？`)) S.pts = d.pts;
+  } catch (e) {}
+}
+function msg(t, warn) { const m = $('#msg'); m.textContent = t; m.className = warn ? 'warn' : 'muted'; }
+</script>
+</body>
+</html>
