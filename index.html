@@ -135,7 +135,7 @@ kbd{border:1px solid #bbb;border-bottom-width:2px;border-radius:3px;padding:0 3p
 const $ = s => document.querySelector(s);
 const cv = $('#cv'), ctx = cv.getContext('2d'), ed = $('#ed');
 const S = { img: null, name: 'image', W: 0, H: 0, zoom: 1, pts: [], sel: -1, editing: -1, editingNew: false };
-const STORE = 'bgimage-coords-v1';
+const STORE = 'bgimage-plotter-v1';
 
 // ---------- 画像の読み込み ----------
 function loadImage(src, name) {
