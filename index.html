@@ -331,8 +331,8 @@ $('#csvFile').onchange = async e => {
   const f = e.target.files[0]; e.target.value = ''; if (!f) return;
   const lines = (await f.text()).replace(/^﻿/, '').split(/\r?\n/).filter(l => l.trim()).map(parseCsvLine);
   const h = lines.shift(), ix = k => h.indexOf(k);
-  // 名前の列は「名前」（このツールの出力）を優先し、なければ「表示名」「駅名」を使う（別の表から作った CSV も読めるように）
-  const ni = ['名前', '表示名', '駅名'].map(ix).find(i => i >= 0) ?? -1;
+  // 名前の列は「名前」（このツールの出力）を優先し、なければ「表示名」を使う（別の表から作った CSV も読めるように）
+  const ni = ['名前', '表示名'].map(ix).find(i => i >= 0) ?? -1;
   // 座標は画素X・画素Y を使う。なければ X・Y を、今の「Y を上向きにする」の設定で画素に戻す
   const px = ix('画素X') >= 0 && ix('画素Y') >= 0, xi = px ? ix('画素X') : ix('X'), yi = px ? ix('画素Y') : ix('Y');
   if (xi < 0 || yi < 0) return msg('X・Y（または画素X・画素Y）の列がある CSV を選んでください。', true);
